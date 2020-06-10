@@ -14,3 +14,4 @@ Design algorithms for:
 pandas
 numpy
 matplotlib
+time
