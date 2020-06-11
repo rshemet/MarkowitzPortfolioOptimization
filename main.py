@@ -4,6 +4,7 @@ from matplotlib import pyplot as plt
 from time import time
 import os
 from shutil import copyfile 
+import datetime
 
 def timeit(f):
     def wrap(*args, **kw):
@@ -64,6 +65,10 @@ class Assets():
         Once we cleaned the data using .get_comparables(), we can generate a 
         dataframe to summarize 10 years of returns for each of our 35 stocks.
 
+        Those 10 years are then split into 5 years of "train" data - on which
+        we base our 'investment' decision - and 5 years of "test" data, on 
+        which we test our investment decision.
+
         Parameters None | Returns None
         """
 
@@ -79,7 +84,12 @@ class Assets():
                 stock_data = pd.read_csv(str('Data/SingleLines/' + filename), parse_dates = ['Date']).set_index('Date')
                 self.asset_matrix[filename.replace('.csv', '')] = stock_data['Close']
 
-        self.asset_matrix = self.asset_matrix
+        end_date_test = self.asset_matrix.index[-1]
+        end_date_train = end_date_test - datetime.timedelta(days = 1827)
+        start_date_train = end_date_test - datetime.timedelta(days = 3654)
+
+        self.asset_matrix_train = self.asset_matrix.loc[start_date_train:end_date_train]
+        self.asset_matrix_test = self.asset_matrix.loc[end_date_train:end_date_test]
 
     @timeit
     def generate_mu_sigma(self):
@@ -88,16 +98,30 @@ class Assets():
         Objective:
 
         Once we extracted stock prices, let us generate the vector of annualized returns
-        and covariance matrix
+        and the asset variance-covariance matrix
 
         Parameters None | Returns None
         """
+
+        stocks_universe = self.asset_matrix_train.columns
+        self.mu_vector = pd.DataFrame(index = stocks_universe, columns = ['mu'])
+
+        for stock in stocks_universe:
+            series = self.asset_matrix_train[stock]
+            log_returns = np.log(series/series.shift(1)).dropna()
+            ann_log_return = np.sum(log_returns) / 5
+            self.mu_vector.loc[stock] = ann_log_return
+
+        log_returns_matrix = np.log(self.asset_matrix_train/self.asset_matrix_train.shift(1))
+        self.vcv_matrix = log_returns_matrix.cov() * 252
+        print(self.vcv_matrix)
 
 
 if __name__ == '__main__':
     iSharesETF = Assets('Data/ETF/iSharesExpTechSoftware.csv')
 
-    # Next line is only called once, at the beginning of the project
+    # Next line is only called once at the beginning of the project
     #iSharesETF.get_comparables()
 
     iSharesETF.extract_single_lines()
+    iSharesETF.generate_mu_sigma()
