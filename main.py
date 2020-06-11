@@ -124,8 +124,8 @@ class Assets():
             ann_log_return = np.sum(log_returns) / 5
             self.mu_vector.loc[stock] = ann_log_return
 
-        log_returns_matrix = np.log(self.asset_matrix_train/self.asset_matrix_train.shift(1))
-        self.vcv_matrix = log_returns_matrix.cov() * 252
+        self.log_returns_matrix = np.log(self.asset_matrix_train/self.asset_matrix_train.shift(1))
+        self.vcv_matrix = self.log_returns_matrix.cov() * 252
 
         rf_raw = pd.read_csv('Data/TBillRate/TB3MS.csv', parse_dates = ['DATE']).set_index('DATE')
         # our rf-rate is taken as of the first month after the beginning of the 'train' period
@@ -143,7 +143,73 @@ class Assets():
 
         Parameters None | Returns None
         """
+
+        def min_var_port(mu, vcv, pi):
+            """
+            subfunction to generate minimum variance for given level of return
+            ___________
+            Parameters:
+            mu - vector of annualized asset (log) returns
+            vcv - annualized covariance matrix of asset (log) returns
+            pi - targeted level of portfolio return
+            ________
+            Outputs:
+            w - vector of weights for given return level
+            var - expected (min) variance
+            """
+            vcv_inverse = np.linalg.inv(vcv)
+            ones_vect = np.ones(len(mu))[:, np.newaxis]
+
+            a = ones_vect.T @ vcv_inverse @ ones_vect
+            b = mu.T @ vcv_inverse @ ones_vect
+            #print(mu.T.to_numpy(), type(vcv_inverse), type(mu.shape))
+            c = mu.T.to_numpy() @ vcv_inverse @ mu
+
+            a = a[0][0]
+            b = b.loc['mu',0]
+            c = c.loc[0,'mu']
+
+            num1 = (a * vcv_inverse @ mu - b * vcv_inverse @ ones_vect) * pi
+            num2 = (c * vcv_inverse @ ones_vect - b * vcv_inverse @ mu)
+            den = a * c - (b**2)
+
+            w = (num1 + num2) / den
+
+            #w = ((a * vcv_inverse @ mu - b * vcv_inverse @ ones_vect) * pi +\
+            #    (c * vcv_inverse @ ones_vect - b * vcv_inverse) * mu) /\
+            #        (a * c - (b**2))
+
+            var = w.T.to_numpy() @ vcv.to_numpy() @ w.to_numpy()
+
+            return w, var**0.5
+
+        annualized_returns = self.log_returns_matrix.sum()/5
+        annualized_variance = self.log_returns_matrix.var() * 252
+        mean_variance_stocks = pd.DataFrame(index = annualized_returns.index)
+        mean_variance_stocks['mu'] = annualized_returns
+        mean_variance_stocks['sigma'] = annualized_variance**0.5
         
+        ranked_positive_returns = [i for i in annualized_returns if i > 0]
+        ranked_positive_returns.sort()
+        lo_bound_return = ranked_positive_returns[0]
+        hi_bound_return = ranked_positive_returns[-1] + 0.2
+        mean_variance_port = pd.DataFrame(columns = ['var'], index = np.arange(
+            lo_bound_return, hi_bound_return, (hi_bound_return - lo_bound_return)/20))
+        
+        for i in mean_variance_port.index:
+            _, var = min_var_port(self.mu_vector, self.vcv_matrix, i)
+            mean_variance_port.loc[i] = var
+        
+        plt.figure(figsize=(12,8))
+        plt.plot(mean_variance_port['var']*100, mean_variance_port.index*100, label = 'Efficiency Frontier')
+        plt.scatter(mean_variance_stocks['sigma']*100, mean_variance_stocks['mu']*100,\
+            s=0.5, c='r', marker='s', label = 'Individual Stocks')
+        plt.title('Efficiency frontier')
+        plt.xlabel('Annualized Standard Deviation (%)')
+        plt.ylabel('Annualized Return (%)')
+        plt.legend()
+        chart_name = str('Efficiency frontier.png')
+        plt.savefig(chart_name, bbox_inches='tight', dpi = 400)
 
     @timeit
     def get_weights(self, constraint = None):
@@ -237,15 +303,15 @@ class Assets():
 
         plt.legend()
         chart_name = str('Constraint:'+str(self.constraint)+' Analysis.png')
-        plt.savefig(chart_name, dpi=750, bbox_inches='tight')
+        plt.savefig(chart_name, dpi=400, bbox_inches='tight')
 
 if __name__ == '__main__':
     iSharesETF = Assets('Data/ETF/iSharesExpTechSoftware.csv')
 
     iSharesETF.get_comparables()
-    #Next line is only called once at the beginning of the project
     iSharesETF.move_stocks()
     iSharesETF.extract_single_lines()
     iSharesETF.generate_mu_vcv_rf()
     iSharesETF.get_weights()
     #iSharesETF.visualize()
+    iSharesETF.build_frontier()
