@@ -15,3 +15,7 @@ pandas
 numpy
 matplotlib
 time
+os
+shutil
+datetime
+(pdb)

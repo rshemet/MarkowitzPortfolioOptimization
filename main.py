@@ -6,6 +6,7 @@ import os
 from shutil import copyfile 
 import datetime
 import pdb
+from scipy.optimize import minimize
 
 def timeit(f):
     def wrap(*args, **kw):
@@ -95,8 +96,11 @@ class Assets():
                 stock_data = pd.read_csv(str('Data/SingleLines/' + filename), parse_dates = ['Date']).set_index('Date')
                 self.asset_matrix[filename.replace('.csv', '')] = stock_data['Close']
 
+        #set "training" period in years
+        self.training_period = 7
+
         self.end_date_test = self.asset_matrix.index[-1]
-        self.end_date_train = self.end_date_test - datetime.timedelta(days = 1827)
+        self.end_date_train = self.end_date_test - datetime.timedelta(days = (10 - self.training_period) * 365)
         self.start_date_train = self.end_date_test - datetime.timedelta(days = 3654)
 
         self.asset_matrix_train = self.asset_matrix.loc[self.start_date_train:self.end_date_train]
@@ -121,7 +125,7 @@ class Assets():
         for stock in stocks_universe:
             series = self.asset_matrix_train[stock]
             log_returns = np.log(series/series.shift(1)).dropna()
-            ann_log_return = np.sum(log_returns) / 5
+            ann_log_return = np.sum(log_returns) / self.training_period
             self.mu_vector.loc[stock] = ann_log_return
 
         self.log_returns_matrix = np.log(self.asset_matrix_train/self.asset_matrix_train.shift(1))
@@ -129,7 +133,68 @@ class Assets():
 
         rf_raw = pd.read_csv('Data/TBillRate/TB3MS.csv', parse_dates = ['DATE']).set_index('DATE')
         # our rf-rate is taken as of the first month after the beginning of the 'train' period
-        self.rf = rf_raw.loc[[rf_raw.index > self.start_date_train][0]].iloc[0, 0]
+        self.rf = rf_raw.loc[[rf_raw.index > self.start_date_train][0]].iloc[0, 0] / 100
+
+    @timeit
+    def get_weights(self, constraint = None, weightcap = None):
+        """Overview of get_weights method
+
+        Objective:
+
+        Here we apply our formula obtained through Lagrangian function to
+        calculate the weights vectors for a maximum Sharpe Ratio portfolio
+
+        ___________
+        Parameters:
+
+        constraint - 'longonly' or None
+        - if None, weights are allowed to be negative
+        - if 'longonly', weights are strictly positive
+        (weights are constrained to add to 100% in either case)
+        
+        ____________
+        Returns None
+        """
+
+        def inverse_sharpe(w):
+            """
+            subfunction that outputs the negative portfolio sharpe ratio for given weights
+            used by scipy minimize to arrive at max sharpe ratio portfolios
+            ___________
+            Parameters:
+            w - vector of weights
+            ________
+            Outputs:
+            inv_sr - minus sharpe ratio
+            """
+            exc_ret = w.T @ self.mu_vector - self.rf
+            std_dev = (w.T @ self.vcv_matrix @ w)**0.5
+            return (-exc_ret/std_dev)
+
+        self.constraint = constraint
+        self.weightcap = weightcap
+        assert constraint in ['longonly', None], 'Check the constraint parameter'
+        if constraint is not None and weightcap is not None:
+            assert weightcap < 1, 'You cant have a long-only fund AND cap single stocks to >100%'
+
+        if constraint == None:
+            ones_vect = np.ones(self.mu_vector.shape[0])[:,np.newaxis]
+            numerator = np.linalg.inv(self.vcv_matrix) @ (self.mu_vector - self.rf * ones_vect)
+            denominator = ones_vect.T @ np.linalg.inv(self.vcv_matrix) @ (self.mu_vector - self.rf * ones_vect)
+            weights = (np.asarray(numerator) / np.asarray(denominator))
+
+        elif constraint == 'longonly':
+            cons = ({'type': 'eq', 'fun': lambda x: x.T @ np.ones(len(x))[:np.newaxis] - 1})
+            bnds = []
+            for j in range(self.mu_vector.shape[0]):
+                bnds.append((0, self.weightcap))
+            x_0 = np.zeros(len(self.mu_vector))
+            x_0[0] = 1
+            weights = minimize(inverse_sharpe, x_0, bounds = bnds, constraints = cons).get('x')
+
+        self.weights = pd.DataFrame(index = self.mu_vector.index, columns = ['Weight'])
+        self.weights['Weight'] = weights
+
 
     @timeit
     def build_frontier(self):
@@ -147,6 +212,7 @@ class Assets():
         def min_var_port(mu, vcv, pi):
             """
             subfunction to generate minimum variance for given level of return
+            UNCONSTRAINED METHOD ONLY
             ___________
             Parameters:
             mu - vector of annualized asset (log) returns
@@ -182,68 +248,86 @@ class Assets():
             var = w.T.to_numpy() @ vcv.to_numpy() @ w.to_numpy()
 
             return w, var**0.5
+        
+        def port_var(w):
+            """
+            subfunction that outputs the portfolio variance for given weights
+            used by scipy minimize to arrive at min var portfolios
+            ___________
+            Parameters:
+            w - vector of weights
+            ________
+            Outputs:
+            var - portfolio variance
+            """
 
-        annualized_returns = self.log_returns_matrix.sum()/5
+            return w.T @ self.vcv_matrix @ w
+
+        annualized_returns = self.log_returns_matrix.sum() / self.training_period
         annualized_variance = self.log_returns_matrix.var() * 252
         mean_variance_stocks = pd.DataFrame(index = annualized_returns.index)
         mean_variance_stocks['mu'] = annualized_returns
         mean_variance_stocks['sigma'] = annualized_variance**0.5
-        
+
         ranked_positive_returns = [i for i in annualized_returns if i > 0]
         ranked_positive_returns.sort()
-        lo_bound_return = ranked_positive_returns[0]
-        hi_bound_return = ranked_positive_returns[-1] + 0.2
-        mean_variance_port = pd.DataFrame(columns = ['var'], index = np.arange(
-            lo_bound_return, hi_bound_return, (hi_bound_return - lo_bound_return)/20))
+
+        if self.constraint == None:
+
+            lo_bound_return = ranked_positive_returns[0]
+            hi_bound_return = ranked_positive_returns[-1] + 1.5
+            mean_variance_port = pd.DataFrame(columns = ['var'], index = np.arange(
+                lo_bound_return, hi_bound_return, (hi_bound_return - lo_bound_return)/20))
+
+            for i in mean_variance_port.index:
+                _, var = min_var_port(self.mu_vector, self.vcv_matrix, i)
+                mean_variance_port.loc[i] = var
+
+        elif self.constraint == 'longonly':
+
+            lo_bound_return = ranked_positive_returns[0]
+            hi_bound_return = ranked_positive_returns[-1] 
+            mean_variance_port = pd.DataFrame(columns = ['var'], index = np.append(np.arange(
+                lo_bound_return, hi_bound_return, (hi_bound_return - lo_bound_return)/20),hi_bound_return))
+
+            for i in mean_variance_port.index:
+                cons = ({'type': 'eq', 'fun': lambda x: x.T @ self.mu_vector - i},\
+                    {'type': 'eq', 'fun': lambda x: x.T @ np.ones(len(x))[:np.newaxis] - 1})                
+                
+                bnds = []
+                for j in range(self.mu_vector.shape[0]):
+                    bnds.append((0, self.weightcap))
+
+                x_0 = np.zeros(len(self.mu_vector))
+                x_0[0] = 1
+
+                w = minimize(port_var, x_0, bounds = bnds, constraints = cons).get('x')
+                var = (w.T @ self.vcv_matrix @ w) ** 0.5
+                mean_variance_port.loc[i] = var
         
-        for i in mean_variance_port.index:
-            _, var = min_var_port(self.mu_vector, self.vcv_matrix, i)
-            mean_variance_port.loc[i] = var
-        
+        cap_allocation_line = pd.DataFrame(columns = ['mu'],\
+            index = np.arange(0,0.9,0.05))
+        exp_ret = (self.weights.T @ self.mu_vector).iloc[0,0]
+        exp_vol = (self.weights.T @ self.vcv_matrix @ self.weights).iloc[0,0] ** 0.5
+        tangency_port = (exp_ret, exp_vol) 
+
+        cal_slope = (exp_ret - self.rf/100) / exp_vol
+        for i in cap_allocation_line.index:
+            cap_allocation_line.loc[i] = self.rf/100 + i*cal_slope
+
         plt.figure(figsize=(12,8))
-        plt.plot(mean_variance_port['var']*100, mean_variance_port.index*100, label = 'Efficiency Frontier')
+        plt.plot(mean_variance_port['var']*100, mean_variance_port.index*100, label = 'Efficient Frontier')
+        plt.plot(cap_allocation_line.index*100, cap_allocation_line['mu']*100,\
+            label = 'Capital Allocation Line', linestyle = 'dashed', linewidth = 1)
         plt.scatter(mean_variance_stocks['sigma']*100, mean_variance_stocks['mu']*100,\
-            s=0.5, c='r', marker='s', label = 'Individual Stocks')
-        plt.title('Efficiency frontier')
+            s=2, c='r', marker='x', label = 'Individual Stocks')
+        plt.scatter(tangency_port[1]*100, tangency_port[0]*100, label = 'Tangency portfolio', marker = 'x')
+        plt.title('Efficient frontier')
         plt.xlabel('Annualized Standard Deviation (%)')
         plt.ylabel('Annualized Return (%)')
         plt.legend()
-        chart_name = str('Efficiency frontier.png')
+        chart_name = str('Efficient frontier: constraint_' + str(self.constraint) + '.png')
         plt.savefig(chart_name, bbox_inches='tight', dpi = 400)
-
-    @timeit
-    def get_weights(self, constraint = None):
-        """Overview of get_weights method
-
-        Objective:
-
-        Here we apply our formula obtained through Lagrangian function to
-        calculate the weights vectors for a maximum Sharpe Ratio portfolio
-
-        ___________
-        Parameters:
-
-        constraint - 'short' or None
-        - if None, weights are allowed to be negative
-        - if 'short', weights are strictly positive
-        (weights are constrained to add to 100% in either case)
-        
-        ____________
-        Returns None
-        """
-
-        self.constraint = constraint
-        assert constraint in ['short', None], 'Check the constraint parameter'
-
-        if constraint == None:
-            ones_vect = np.ones(self.mu_vector.shape[0])[:,np.newaxis]
-            numerator = np.linalg.inv(self.vcv_matrix) @ (self.mu_vector - self.rf * ones_vect)
-            denominator = ones_vect.T @ np.linalg.inv(self.vcv_matrix) @ (self.mu_vector - self.rf * ones_vect)
-            weights = (np.asarray(numerator) / np.asarray(denominator))
-            self.weights = pd.DataFrame(index = self.mu_vector.index, columns = ['Weight'])
-            self.weights['Weight'] = weights
-        elif constraint == 'short':
-            pass
 
     @timeit
     def visualize(self, comp_path = 'Data/ETF/iSharesExpTechSoftwarePerf.csv'):
@@ -302,7 +386,7 @@ class Assets():
         perf.set_ylabel('Performance (rebased to 100)')
 
         plt.legend()
-        chart_name = str('Constraint:'+str(self.constraint)+' Analysis.png')
+        chart_name = str('Analysis: constraint_' +str(self.constraint)+ '.png')
         plt.savefig(chart_name, dpi=400, bbox_inches='tight')
 
 if __name__ == '__main__':
@@ -312,6 +396,6 @@ if __name__ == '__main__':
     iSharesETF.move_stocks()
     iSharesETF.extract_single_lines()
     iSharesETF.generate_mu_vcv_rf()
-    iSharesETF.get_weights()
-    #iSharesETF.visualize()
+    iSharesETF.get_weights(constraint='longonly', weightcap=0.2)
+    iSharesETF.visualize()
     iSharesETF.build_frontier()
