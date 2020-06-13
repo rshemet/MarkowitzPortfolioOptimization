@@ -5,9 +5,7 @@ This repository contains code that allows you to extract the composition and per
 of any exchange-traded fund and attempt to allocate its constituent assets differently,
 according to the mean-variance optimization framework.
 
-# To-Dos:
-
-Algorithms supported:
+# Algorithms supported:
 
 - Unconstrained optimization
 - Constrained (sum weights = 1) optimization
