@@ -26,7 +26,7 @@ class Assets():
         self.ETFdata = pd.read_csv(datapath).set_index(index)
 
     @timeit
-    def get_comparables(self):
+    def get_comparables(self, min_data_len = 10):
         """Overview of get_comparables method
 
         Objective:
@@ -35,10 +35,16 @@ class Assets():
         Check which of them are present in our historical dataset AND
         have >10yrs history, save to stocks_left DF
         
-        Parameters None | Returns None
+        __________
+        Parameters 
+        min_data_len - parameter by which we select stocks. Only those with 
+        more than min_data_len years available are chosen.
+        
+        Returns None
         """
 
         tickers_summary = pd.DataFrame(columns = ['Ticker', 'Data Yrs', 'ETF Weight']).set_index('Ticker')
+        self.min_data_len = min_data_len
 
         for ticker in self.ETFdata.index:
             stock_file = str('Data/Stocks/' + ticker.lower()  + '.us.txt')
@@ -47,11 +53,8 @@ class Assets():
                 port_weight = self.ETFdata.loc[ticker, 'Weight (%)']
                 date_span = (ticker_data.index[-1] - ticker_data.index[0]) / np.timedelta64(1, 'Y')
                 tickers_summary.loc[ticker, :] = date_span, port_weight
-        
-        # At this point, I ran a simple summary statistic and chose to leave stocks with 10+ years
-        # of historic returns (we leave 35 stocks, accounting for >60% of portfolio value)
 
-        self.stocks_left = tickers_summary[tickers_summary['Data Yrs'] > 10]
+        self.stocks_left = tickers_summary[tickers_summary['Data Yrs'] > self.min_data_len]
 
     @timeit 
     def move_stocks(self):
@@ -69,7 +72,7 @@ class Assets():
             copyfile(source, str('Data/SingleLines/' + ticker + '.csv'))
 
     @timeit
-    def extract_single_lines(self):
+    def extract_single_lines(self, training_period):
         """Overview of extract_single_lines method
 
         Objective:
@@ -97,11 +100,12 @@ class Assets():
                 self.asset_matrix[filename.replace('.csv', '')] = stock_data['Close']
 
         #set "training" period in years
-        self.training_period = 7
+        self.training_period = training_period
 
         self.end_date_test = self.asset_matrix.index[-1]
-        self.end_date_train = self.end_date_test - datetime.timedelta(days = (10 - self.training_period) * 365)
-        self.start_date_train = self.end_date_test - datetime.timedelta(days = 3654)
+        self.end_date_train = self.end_date_test - datetime.timedelta(
+            days = (self.min_data_len - self.training_period) * 365)
+        self.start_date_train = self.end_date_test - datetime.timedelta(days = 365 * self.min_data_len + 4)
 
         self.asset_matrix_train = self.asset_matrix.loc[self.start_date_train:self.end_date_train]
         self.asset_matrix_test = self.asset_matrix.loc[self.end_date_train:self.end_date_test]
@@ -134,6 +138,7 @@ class Assets():
         rf_raw = pd.read_csv('Data/TBillRate/TB3MS.csv', parse_dates = ['DATE']).set_index('DATE')
         # our rf-rate is taken as of the first month after the beginning of the 'train' period
         self.rf = rf_raw.loc[[rf_raw.index > self.start_date_train][0]].iloc[0, 0] / 100
+        self.rf_test = rf_raw.loc[[rf_raw.index > self.end_date_train][0]].iloc[0, 0] / 100
 
     @timeit
     def get_weights(self, constraint = None, weightcap = None):
@@ -228,7 +233,6 @@ class Assets():
 
             a = ones_vect.T @ vcv_inverse @ ones_vect
             b = mu.T @ vcv_inverse @ ones_vect
-            #print(mu.T.to_numpy(), type(vcv_inverse), type(mu.shape))
             c = mu.T.to_numpy() @ vcv_inverse @ mu
 
             a = a[0][0]
@@ -240,10 +244,6 @@ class Assets():
             den = a * c - (b**2)
 
             w = (num1 + num2) / den
-
-            #w = ((a * vcv_inverse @ mu - b * vcv_inverse @ ones_vect) * pi +\
-            #    (c * vcv_inverse @ ones_vect - b * vcv_inverse) * mu) /\
-            #        (a * c - (b**2))
 
             var = w.T.to_numpy() @ vcv.to_numpy() @ w.to_numpy()
 
@@ -287,6 +287,7 @@ class Assets():
 
             lo_bound_return = ranked_positive_returns[0]
             hi_bound_return = ranked_positive_returns[-1] 
+
             mean_variance_port = pd.DataFrame(columns = ['var'], index = np.append(np.arange(
                 lo_bound_return, hi_bound_return, (hi_bound_return - lo_bound_return)/20),hi_bound_return))
 
@@ -326,7 +327,8 @@ class Assets():
         plt.xlabel('Annualized Standard Deviation (%)')
         plt.ylabel('Annualized Return (%)')
         plt.legend()
-        chart_name = str('Efficient frontier: constraint_' + str(self.constraint) + '.png')
+        chart_name = str('Outputs/Frontier_cons_' + str(self.constraint) + \
+            '_cap_' + str(self.weightcap) + '_train_' + str(self.training_period) + 'yrs.png')
         plt.savefig(chart_name, bbox_inches='tight', dpi = 400)
 
     @timeit
@@ -345,6 +347,7 @@ class Assets():
         Returns None
         """
 
+        #Weights allocation
         ETF_vs_sl = self.stocks_left
         ETF_vs_sl['Our Weights'] = (self.weights * 100)
         ETF_vs_sl = ETF_vs_sl.reindex(self.weights.index)
@@ -386,16 +389,118 @@ class Assets():
         perf.set_ylabel('Performance (rebased to 100)')
 
         plt.legend()
-        chart_name = str('Analysis: constraint_' +str(self.constraint)+ '.png')
+        chart_name = str('Outputs/Performance_cons_' + str(self.constraint) + \
+            '_cap_' + str(self.weightcap) + '_train_' + str(self.training_period) + 'yrs.png')
         plt.savefig(chart_name, dpi=400, bbox_inches='tight')
+
+        self.strat_ann_ret = (asset_holdings['Overall Portfolio'].iloc[-1] \
+            / asset_holdings['Overall Portfolio'].iloc[0]) ** (1 / (self.min_data_len - self.training_period)) - 1
+        self.strat_ann_vol = (asset_holdings['Overall Portfolio'].pct_change().var() * 252) ** 0.5
+        self.strat_sharpe_ratio = (self.strat_ann_ret - self.rf_test) / self.strat_ann_vol
+        strat_weights = list(self.weights['Weight'])
+        strat_weights.sort(reverse = True)
+        self.strat_top5_concentration = np.sum(strat_weights[0:5]) * 100
+
+        self.fund_ann_ret = (ETF_perf_time_period['Close'].iloc[-1] \
+            / ETF_perf_time_period['Close'].iloc[0]) ** (1 / (self.min_data_len - self.training_period)) - 1
+        self.fund_ann_vol = (ETF_perf_time_period['Close'].pct_change().var() * 252) ** 0.5
+        self.fund_sharpe_ratio = (self.fund_ann_ret - self.rf_test) / self.fund_ann_vol
+        self.fund_top5_concentration = self.stocks_left['ETF Weight'].iloc[0:5].sum()
+
+    def summary(self, port=False):
+        """Overview of summary method
+
+        Objective:
+        Output 4 metrics for fund and current strategy:
+        -Sharpe Ratio
+        -Annualized return
+        -Annualized volatility
+        -Average weight in top 5 positions
+
+        ___________
+        Parameters:
+        port (bool) - whether we output portfolio metrics too
+        
+        ____________
+        Returns 
+        strat_sum
+        OR
+        strat_sum AND port_sum
+        """
+
+        strat_sum = (
+            self.strat_sharpe_ratio,\
+            self.strat_ann_ret,\
+            self.strat_ann_vol,\
+            self.strat_top5_concentration
+        )
+
+        if port:
+            port_sum = (
+                self.fund_sharpe_ratio,\
+                self.fund_ann_ret,\
+                self.fund_ann_vol,\
+                self.fund_top5_concentration
+            )
+            return port_sum, strat_sum
+        
+        return strat_sum
+        
 
 if __name__ == '__main__':
     iSharesETF = Assets('Data/ETF/iSharesExpTechSoftware.csv')
 
+    experiments=(
+        (None, None),\
+        ('longonly', None),\
+        ('longonly', 0.1),\
+        ('longonly', 0.2)
+    )
+
+    summary = {
+        "Fund X": '',\
+        "Long/Short": '',\
+        "Long Only": '',\
+        "LO 10%Cap": '',\
+        "LO 20%Cap": ''
+    }
+
     iSharesETF.get_comparables()
     iSharesETF.move_stocks()
-    iSharesETF.extract_single_lines()
+    iSharesETF.extract_single_lines(training_period=7)
     iSharesETF.generate_mu_vcv_rf()
-    iSharesETF.get_weights(constraint='longonly', weightcap=0.2)
-    iSharesETF.visualize()
-    iSharesETF.build_frontier()
+
+    k = 1
+    for exp in experiments:
+        iSharesETF.get_weights(constraint=exp[0], weightcap=exp[1])
+        iSharesETF.visualize()
+        iSharesETF.build_frontier()
+        if k == 1:
+            summary['Fund X'], summary['Long/Short'] = iSharesETF.summary(port=True)
+        else:
+            summary[list(summary.keys())[k]] = iSharesETF.summary(port=False)
+        k+=1
+    
+    fig, axs = plt.subplots(2,2, figsize=(12,12))
+
+    for key, val in summary.items():
+        color = 'tab:blue' if key == 'Fund X' else 'tab:orange'
+        axs[0,0].bar(key, val[0], label = key, color=color)
+        axs[0,0].set_title('Sharpe Ratios')
+        axs[0,0].set_ylabel('Sharpe Ratio')
+        axs[0,0].tick_params(labelrotation=45, labelsize = 8)
+        axs[0,1].bar(key, val[1] * 100, label = key, color=color)
+        axs[0,1].set_title('Annualized Performance')
+        axs[0,1].set_ylabel('Return (%)')
+        axs[0,1].tick_params(labelrotation=45, labelsize = 8)
+        axs[1,0].bar(key, val[2] * 100, label = key, color=color)
+        axs[1,0].set_title('Annualized Volatility')
+        axs[1,0].set_ylabel('Std. Deviation (%)')
+        axs[1,0].tick_params(labelrotation=45, labelsize = 8)
+        axs[1,1].bar(key, val[3], label = key, color=color)
+        axs[1,1].set_title('Top 5 Holdings Concentration')
+        axs[1,1].set_ylabel('(%) Allocation')
+        axs[1,1].tick_params(labelrotation=45, labelsize = 8)
+    
+    fig.suptitle('Summary Statistics')
+    plt.savefig('Summary.png', dpi=400, bbox_inches='tight')
