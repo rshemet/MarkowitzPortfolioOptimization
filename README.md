@@ -19,12 +19,12 @@ Data/Stocks/ should have all the stock files downloaded from Kaggle
 
 # Required libraries:
 
-pandas \
-numpy  \
-matplotlib \
-time \
-os \
-shutil \
-datetime \
-(pdb) \
-scipy
+- pandas 
+- numpy  
+- matplotlib 
+- time 
+- os 
+- shutil 
+- datetime 
+- (pdb) 
+- scipy
