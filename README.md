@@ -14,7 +14,8 @@ according to the mean-variance optimization framework.
 # Instructions
 
 Data/ETF/ should have two .csv files for the benchmark fund: one with performance and one 
-with composition &nbsp;
+with composition 
+&nbsp;
 Data/Stocks/ should have all the stock files downloaded from Kaggle
 
 # Required libraries:
