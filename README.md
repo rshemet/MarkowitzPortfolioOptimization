@@ -11,6 +11,10 @@ according to the mean-variance optimization framework.
 - Constrained (sum weights = 1) optimization
 - Short-selling constrained optimization
 
+# Blog-like Description:
+
+https://towardsdatascience.com/beating-the-etf-portfolio-optimisation-using-python-and-some-linear-algebra-e48d0e0e44f
+
 # Instructions
 
 Data/ETF/ should have two .csv files for the benchmark fund: one with performance and one 
